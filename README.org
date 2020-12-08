@@ -1,0 +1,59 @@
+* AWS Serverless Devops Python
+
+This project is an example AWS Lambda application with Python, DynamoDB, and
+CI/CD. It is integrated with GitHub and uses AWS CodeBuild to run tests and
+deploy on each commit to master. It also provides local development with
+emulated Lambda and DynamoDB services.
+
+- Use AWS's [[https://docs.aws.amazon.com/toolkit-for-vscode/latest/userguide/welcome.html][VS Code Extension]] for debugging of local Lambda functions
+- Requires SAM CLI - [[https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/serverless-sam-cli-install.html][Install the SAM CLI]]
+
+** Set Up
+
+1. Replace the default parameter values in ~template.yml~ for your app.
+2. Run ~sam build~ (optionally with ~--use-container~) and ~sam deploy~ to
+   deploy/update AWS resources.
+   a. Use ~sam build --guided~ the first time to set things up correctly.
+3. See the GitHub Integration section. After that is complete, for code changes,
+   just push to master and the changes will be built, tested and published.
+4. See ~README-original.md~ for additional instructions.
+
+*** GitHub Integration
+
+This should be the only manual step you need to perform in the console:
+
+Go to the Connections section under the Settings in the Developer Tools page of
+the console. This URL looks like [[https://ca-central-1.console.aws.amazon.com/codesuite/settings/connections?region=ca-central-1&connections-meta=eyJmIjp7InRleHQiOiIifSwicyI6e30sIm4iOjIwLCJpIjowfQ][this]] for me. You should be able to find these
+settings next to code pipeline.
+
+Create a GitHub Connection named "GitHubConnection". Then authorize AWS and
+choose to install a new app, then finish creating the connection.
+
+Copy the connection ARN into the ~GitHubConnectionArn~ parameter in
+~template.yaml~.
+
+** Development
+
+#+begin_src bash
+  docker-compose up # Sets up docker networks and database
+  bash start-api.sh # Starts the local lambda server, sets up the DynamoDB table
+#+end_src
+
+- DynamoDB emulation is configured to save the database between runs.
+- Some useful tasks and launch configs are defined in the ~.vscode~ folder.
+- The Pylance extension is recommended for VSCode to make use of the
+  ~boto3-stubs~ for the AWS SDK
+
+** Tearing it Down
+
+Note: You may need to empty the pipeline bucket before it can be deleted with
+the rest of the resources.
+
+Go to the stack in the CloudFormation console and click delete. This will delete
+the majority of the resources. The remaining resources will be:
+
+- The CloudFormation role. You may want to delete this manually. A retain
+  deletion policy was added to this role because otherwise it can be deleted
+  before the rest of the resources, then the rest of the resources can't be
+  deleted because this was the role being used to delete them.
+- AWS SAM CLI managed resources, namely the S3 bucket and the stack

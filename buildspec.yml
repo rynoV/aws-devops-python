@@ -1,0 +1,19 @@
+version: 0.2
+phases:
+    install:
+        commands:
+            # Install all dependencies (including dependencies for running tests)
+            - pip install -r requirements.txt
+    pre_build:
+        commands:
+            # Discover and run unit tests in the '__tests__' directory
+            - python -m pytest tests/ -v
+            # Remove all unit tests to reduce the size of the package that will be ultimately uploaded to Lambda
+            - rm -rf tests
+    build:
+        commands:
+            # Use AWS SAM to package the application by using AWS CloudFormation
+            - aws cloudformation package --template template.yaml --s3-bucket $S3_BUCKET --output-template template-export.yaml
+artifacts:
+    files:
+        - template-export.yaml

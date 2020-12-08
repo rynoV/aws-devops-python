@@ -1,0 +1,239 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+    aws-python-lambda-devops
+
+Parameters:
+    AppName:
+        Type: String
+        Default: AWSDevops
+        Description: 'The name of the application, used in various resource names'
+    GitHubRepoID:
+        Type: String
+        Default: rynoV/sam-app
+        Description: 'Should be of the form github-username/repo-name'
+    GitHubConnectionArn:
+        Type: String
+        Default: arn:aws:codestar-connections:ca-central-1:269171839243:connection/bc819a26-ba97-48a2-ba2f-c7aa55d838af
+        Description: 'See the README for details on how to configure'
+    GitHubDeployBranch:
+        Type: String
+        Default: master
+        Description: 'The deployment branch which should automatically trigger the pipeline'
+
+Resources:
+    PipelineBucket:
+        Type: 'AWS::S3::Bucket'
+
+    HelloWorldFunction:
+        Type: AWS::Serverless::Function
+        Properties:
+            CodeUri: hello_world/
+            Handler: app.lambda_handler
+            Runtime: python3.8
+            Events:
+                HelloWorld:
+                    Type: Api
+                    Properties:
+                        Path: /hello
+                        Method: get
+
+    DynamoFunction:
+        Type: AWS::Serverless::Function
+        Properties:
+            CodeUri: dynamo/
+            Handler: app.lambda_handler
+            Runtime: python3.8
+            Events:
+                HelloWorld:
+                    Type: Api
+                    Properties:
+                        Path: /dynamo
+                        Method: get
+            Policies:
+                - DynamoDBCrudPolicy:
+                      TableName: !Ref SampleTable
+            Environment:
+                Variables:
+                    SAMPLE_TABLE: !Ref SampleTable
+                    # Necessary for env.json variables to work in development
+                    ENDPOINT_OVERRIDE: ''
+
+    SampleTable:
+        Type: AWS::Serverless::SimpleTable
+        Properties:
+            TableName: SamAppTable
+            PrimaryKey:
+                Name: id
+                Type: String
+            ProvisionedThroughput:
+                ReadCapacityUnits: 2
+                WriteCapacityUnits: 2
+
+    Pipeline:
+        Type: AWS::CodePipeline::Pipeline
+        Properties:
+            ArtifactStore:
+                Location: !Ref PipelineBucket
+                Type: S3
+            Name: !Sub '${AppName}Pipeline'
+            RoleArn: !GetAtt PipelineRole.Arn
+            Stages:
+                - Name: Source
+                  Actions:
+                      - Name: GitHub
+                        InputArtifacts: []
+                        ActionTypeId:
+                            Category: Source
+                            Owner: AWS
+                            Version: '1'
+                            Provider: CodeStarSourceConnection
+                        OutputArtifacts:
+                            - Name: SourceArtifact
+                        Configuration:
+                            ConnectionArn: !Ref GitHubConnectionArn
+                            FullRepositoryId: !Ref GitHubRepoID
+                            BranchName: !Ref GitHubDeployBranch
+                            OutputArtifactFormat: CODEBUILD_CLONE_REF
+                        RunOrder: 1
+                - Name: Build
+                  Actions:
+                      - Name: CodeBuild
+                        InputArtifacts:
+                            - Name: SourceArtifact
+                        ActionTypeId:
+                            Category: Build
+                            Owner: AWS
+                            Version: '1'
+                            Provider: CodeBuild
+                        OutputArtifacts:
+                            - Name: TemplateSource
+                        Configuration:
+                            ProjectName: !Ref CodeBuild
+                        RunOrder: 2
+                - Name: Prod
+                  Actions:
+                      - Name: CreateChangeSet
+                        ActionTypeId:
+                            Category: Deploy
+                            Owner: AWS
+                            Provider: CloudFormation
+                            Version: 1
+                        Configuration:
+                            ActionMode: CHANGE_SET_REPLACE
+                            RoleArn: !GetAtt CFNRole.Arn
+                            StackName: !Ref AWS::StackName
+                            ChangeSetName: AppChangeSetProd
+                            TemplatePath: TemplateSource::template-export.yaml
+                            Capabilities: CAPABILITY_IAM
+                        InputArtifacts:
+                            - Name: TemplateSource
+                        RunOrder: 1
+                      - Name: ExecuteChangeSet
+                        ActionTypeId:
+                            Category: Deploy
+                            Owner: AWS
+                            Provider: CloudFormation
+                            Version: 1
+                        Configuration:
+                            ActionMode: CHANGE_SET_EXECUTE
+                            RoleArn: !GetAtt CFNRole.Arn
+                            StackName: !Ref AWS::StackName
+                            ChangeSetName: AppChangeSetProd
+                        OutputArtifacts:
+                            - Name: !Sub '${AppName}ProdChangeSet'
+                        RunOrder: 2
+
+    CodeBuild:
+        Type: AWS::CodeBuild::Project
+        Properties:
+            Description: 'Submit build jobs as part of CI/CD pipeline'
+            ServiceRole: !Ref CodeBuildServiceRole
+            Artifacts:
+                Type: CODEPIPELINE
+            Source:
+                Type: CODEPIPELINE
+            Environment:
+                Type: LINUX_CONTAINER
+                ComputeType: BUILD_GENERAL1_SMALL
+                Image: 'aws/codebuild/standard:4.0'
+                EnvironmentVariables:
+                    - Name: S3_BUCKET
+                      Value: !Ref PipelineBucket
+
+    # This role is assumed by cloudformation when making changes
+    CFNRole:
+        Type: AWS::IAM::Role
+        # Retain this role on deletion because it is necessary for deleting
+        # everything. Delete it manually if necessary
+        DeletionPolicy: Retain
+        Properties:
+            AssumeRolePolicyDocument:
+                Statement:
+                    - Action: ['sts:AssumeRole']
+                      Effect: Allow
+                      Principal:
+                          Service: [cloudformation.amazonaws.com]
+                Version: '2012-10-17'
+            Path: /
+            ManagedPolicyArns:
+                # Seems to be necessary to use admin permissions here so that
+                # CloudFormation doesn't get stuck all the time in build
+                - 'arn:aws:iam::aws:policy/AdministratorAccess'
+
+    PipelineRole:
+        Type: AWS::IAM::Role
+        Properties:
+            AssumeRolePolicyDocument:
+                Statement:
+                    - Action: ['sts:AssumeRole']
+                      Effect: Allow
+                      Principal:
+                          Service: codepipeline.amazonaws.com
+                Version: '2012-10-17'
+            Path: /
+            Policies:
+                - PolicyName: CodePipelineAccess
+                  PolicyDocument:
+                      Version: '2012-10-17'
+                      Statement:
+                          - Action:
+                                - 'iam:PassRole'
+                            Effect: Allow
+                            Resource: '*'
+            ManagedPolicyArns:
+                - 'arn:aws:iam::aws:policy/AmazonS3FullAccess'
+                - 'arn:aws:iam::aws:policy/AWSCodeBuildAdminAccess'
+                - 'arn:aws:iam::aws:policy/AWSCloudFormationFullAccess'
+
+    CodeBuildServiceRole:
+        Type: 'AWS::IAM::Role'
+        Properties:
+            AssumeRolePolicyDocument:
+                Version: 2012-10-17
+                Statement:
+                    - Sid: ''
+                      Effect: Allow
+                      Principal:
+                          Service: codebuild.amazonaws.com
+                      Action: 'sts:AssumeRole'
+            Path: /
+            Policies:
+                # Policy for GitHub cloning in pipeline from https://docs.aws.amazon.com/codepipeline/latest/userguide/troubleshooting.html#codebuild-role-connections
+                - PolicyName: GitHubAccess
+                  PolicyDocument:
+                      Version: '2012-10-17'
+                      Statement:
+                          - Action:
+                                - 'codestar-connections:UseConnection'
+                            Effect: Allow
+                            Resource: !Ref GitHubConnectionArn
+            ManagedPolicyArns:
+                - 'arn:aws:iam::aws:policy/CloudWatchLogsFullAccess'
+                - 'arn:aws:iam::aws:policy/AmazonS3FullAccess'
+
+Outputs:
+    # ServerlessRestApi is an implicit API created out of Events key under Serverless::Function
+    LambdaEndpoint:
+        Description: 'API Gateway endpoint URL'
+        Value: !Sub 'https://${ServerlessRestApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/Prod/'
